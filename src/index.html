@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Pittsburgh EV Route Demo</title>
+  <title>Pittsburgh EV Route Baseline</title>
 
-  <!-- Leaflet CSS (open source, CDN) -->
+  <!-- Leaflet CSS -->
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -13,22 +13,113 @@
   />
 
   <style>
-    /* Make the page and map fill the window nicely */
     html, body {
-      height: 100%;
       margin: 0;
+      height: 100%;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #app {
+      display: flex;
+      height: 100%;
+    }
+    #sidebar {
+      width: 320px;
+      padding: 12px;
+      box-sizing: border-box;
+      border-right: 1px solid #ccc;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
     }
     #map {
-      height: 100%;
+      flex: 1;
+    }
+    label {
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    select, input {
       width: 100%;
+      padding: 6px;
+      margin-top: 2px;
+      margin-bottom: 6px;
+      box-sizing: border-box;
+    }
+    button {
+      padding: 8px;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+    #summary {
+      font-size: 0.85rem;
+      margin-top: 8px;
+      padding: 8px;
+      border-radius: 6px;
+      background: #f7f7f7;
+      max-height: 40%;
+      overflow-y: auto;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      margin-right: 4px;
+      background: #e0ecff;
     }
   </style>
 </head>
 <body>
 
-<div id="map"></div>
+<div id="app">
+  <div id="sidebar">
+    <h3>EV Route Baseline – Pittsburgh</h3>
 
-<!-- Leaflet JS (open source, CDN) -->
+    <div>
+      <label for="start-select">Start Location</label>
+      <select id="start-select">
+        <option value="point_state_park">Point State Park</option>
+        <option value="cmu">Carnegie Mellon University</option>
+        <option value="pitt">University of Pittsburgh (Cathedral of Learning)</option>
+        <option value="airport">Pittsburgh International Airport</option>
+      </select>
+    </div>
+
+    <div>
+      <label for="end-select">End Location</label>
+      <select id="end-select">
+        <option value="cmu">Carnegie Mellon University</option>
+        <option value="point_state_park">Point State Park</option>
+        <option value="pitt">University of Pittsburgh (Cathedral of Learning)</option>
+        <option value="airport">Pittsburgh International Airport</option>
+      </select>
+    </div>
+
+    <div>
+      <label for="battery-input">Battery at Start (%)</label>
+      <input id="battery-input" type="number" min="5" max="100" value="60" />
+    </div>
+
+    <div>
+      <label for="vehicle-select">Vehicle Type</label>
+      <select id="vehicle-select">
+        <option value="compact">Compact (50 kWh, 0.15 kWh/km)</option>
+        <option value="sedan" selected>Sedan (60 kWh, 0.18 kWh/km)</option>
+        <option value="suv">SUV (75 kWh, 0.22 kWh/km)</option>
+      </select>
+    </div>
+
+    <button id="plan-btn">Plan EV Route</button>
+
+    <div id="summary">
+      <em>Fill in parameters and click “Plan EV Route” to see a baseline route.</em>
+    </div>
+  </div>
+
+  <div id="map"></div>
+</div>
+
+<!-- Leaflet JS -->
 <script
   src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
   integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
@@ -36,34 +127,316 @@
 ></script>
 
 <script>
-  // 1. Create the map, centered roughly on Pittsburgh
-  const pittsburghCenter = [40.4406, -79.9959];
+  // ========= CONFIG: PUT YOUR API KEYS HERE =========
+  const ORS_API_KEY = "***ADD API KEY FROM GOOGLE DOC***";   // Get from openrouteservice.org
+  const OCM_API_KEY = "***ADD API KEY FROM GOOGLE DOC***";   // Get from openchargemap.org (optional but recommended)
 
-  const map = L.map('map').setView(pittsburghCenter, 13);
+  // ========= SIMPLE DATA MODELS =========
 
-  // 2. Add OpenStreetMap tiles (open source, free)
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  // Hard-coded Pittsburgh landmarks (lat, lon)
+  const LOCATIONS = {
+    point_state_park: { name: "Point State Park", coords: [40.4414, -80.0089] },
+    cmu:              { name: "Carnegie Mellon University", coords: [40.4445, -79.9436] },
+    pitt:             { name: "University of Pittsburgh", coords: [40.4440, -79.9607] },
+    airport:          { name: "Pittsburgh International Airport", coords: [40.4950, -80.2560] }
+  };
+
+  // Very simple vehicle models (capacity in kWh, consumption in kWh per km)
+  const VEHICLES = {
+    compact: { label: "Compact", capacity: 50, consumption: 0.15 },
+    sedan:   { label: "Sedan",   capacity: 60, consumption: 0.18 },
+    suv:     { label: "SUV",     capacity: 75, consumption: 0.22 }
+  };
+
+  // Safety reserve: minimum SOC (%) we want to keep at all times
+  const MIN_RESERVE_PERCENT = 10;
+
+  // Assumed fixed DC fast charging session (for baseline demo)
+  const CHARGE_TARGET_PERCENT = 80;      // charge up to 80%
+  const CHARGE_SESSION_MINUTES = 30;     // assume 30 minutes every time we stop
+
+  // ========= LEAFLET MAP SETUP =========
+  const map = L.map("map").setView([40.44, -79.99], 12);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 19,
-    attribution: '&copy; OpenStreetMap contributors'
+    attribution: "&copy; OpenStreetMap contributors"
   }).addTo(map);
 
-  // 3. Example short route in Pittsburgh (Point State Park → Downtown → CMU)
-  //    These are just sample coordinates for visualization.
-  const routeCoords = [
-    [40.4414, -80.0089],  // Point State Park
-    [40.4417, -79.9933],  // Downtown near Steel Plaza
-    [40.4445, -79.9436]   // Carnegie Mellon University area
-  ];
+  let routeLayers = [];  // keep track of current route polylines / markers
 
-  // 4. Draw the route as a polyline
-  const routeLine = L.polyline(routeCoords, { color: 'blue', weight: 5 }).addTo(map);
+  function clearMap() {
+    routeLayers.forEach(l => map.removeLayer(l));
+    routeLayers = [];
+  }
 
-  // 5. Fit the map view to the route bounds
-  map.fitBounds(routeLine.getBounds());
+  function addLayer(layer) {
+    routeLayers.push(layer);
+    layer.addTo(map);
+  }
 
-  // 6. Optional: add markers for start/end
-  L.marker(routeCoords[0]).addTo(map).bindPopup("Start: Point State Park");
-  L.marker(routeCoords[routeCoords.length - 1]).addTo(map).bindPopup("End: CMU");
+  const summaryDiv = document.getElementById("summary");
+
+  // ========= HELPER FUNCTIONS =========
+
+  // Convert [lat, lon] to [lon, lat] for ORS
+  function toLonLat(latlon) {
+    return [latlon[1], latlon[0]];
+  }
+
+  // Pretty minutes from seconds
+  function fmtMinutes(seconds) {
+    return (seconds / 60).toFixed(1);
+  }
+
+  function fmtKm(meters) {
+    return (meters / 1000).toFixed(1);
+  }
+
+  // Call OpenRouteService directions API
+  async function getRouteDirections(startLatLon, endLatLon) {
+    const body = {
+      coordinates: [
+        toLonLat(startLatLon),
+        toLonLat(endLatLon)
+      ]
+    };
+
+    const res = await fetch("https://api.openrouteservice.org/v2/directions/driving-car/geojson", {
+      method: "POST",
+      headers: {
+        "Authorization": ORS_API_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error("ORS error: " + res.status + " - " + txt);
+    }
+
+    const json = await res.json();
+    const feature = json.features[0];
+    const coords = feature.geometry.coordinates; // [lon,lat] list
+    const summary = feature.properties.summary;  // distance (m), duration (s)
+    return { coords, summary };
+  }
+
+  // Query Open Charge Map near a coordinate (lat, lon)
+  async function findChargingStationNear(latlon) {
+    const [lat, lon] = latlon;
+    const params = new URLSearchParams({
+      output: "json",
+      latitude: lat.toString(),
+      longitude: lon.toString(),
+      distance: "5",        // 5km radius
+      distanceunit: "KM",
+      maxresults: "1",
+      key: OCM_API_KEY      // can sometimes be omitted, but better to use a key
+    });
+
+    const url = "https://api.openchargemap.io/v3/poi/?" + params.toString();
+    const res = await fetch(url);
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error("OCM error: " + res.status + " - " + txt);
+    }
+
+    const arr = await res.json();
+    if (!arr || arr.length === 0) {
+      return null;
+    }
+
+    const poi = arr[0];
+    const clat = poi.AddressInfo.Latitude;
+    const clon = poi.AddressInfo.Longitude;
+    const title = poi.AddressInfo.Title || "Charging Station";
+    return { lat: clat, lon: clon, title };
+  }
+
+  // ========= CORE EV LOGIC =========
+  async function planEvRoute() {
+    clearMap();
+    summaryDiv.innerHTML = "<em>Planning route...</em>";
+
+    const startKey = document.getElementById("start-select").value;
+    const endKey = document.getElementById("end-select").value;
+    const batteryStartPct = parseFloat(document.getElementById("battery-input").value);
+    const vehicleKey = document.getElementById("vehicle-select").value;
+
+    if (!LOCATIONS[startKey] || !LOCATIONS[endKey]) {
+      summaryDiv.innerHTML = "Invalid start or end location.";
+      return;
+    }
+
+    if (isNaN(batteryStartPct) || batteryStartPct < 5 || batteryStartPct > 100) {
+      summaryDiv.innerHTML = "Please enter a starting battery between 5 and 100.";
+      return;
+    }
+
+    const start = LOCATIONS[startKey];
+    const end = LOCATIONS[endKey];
+    const vehicle = VEHICLES[vehicleKey];
+
+    const capacity = vehicle.capacity;         // kWh
+    const consumption = vehicle.consumption;   // kWh per km
+
+    const startEnergy = (batteryStartPct / 100.0) * capacity; // kWh
+    const reserveEnergy = (MIN_RESERVE_PERCENT / 100.0) * capacity;
+
+    try {
+      // 1) Direct route first
+      const direct = await getRouteDirections(start.coords, end.coords);
+      const distanceKm = direct.summary.distance / 1000.0;
+      const driveEnergy = distanceKm * consumption;
+      const driveTimeSec = direct.summary.duration;
+
+      // Can we complete this route without charging?
+      if (driveEnergy <= (startEnergy - reserveEnergy)) {
+        // No charging needed
+        const finalEnergy = startEnergy - driveEnergy;
+        const finalPct = (finalEnergy / capacity) * 100.0;
+
+        // Draw route
+        const latlngs = direct.coords.map(c => [c[1], c[0]]);
+        const poly = L.polyline(latlngs, { color: "blue", weight: 5 });
+        addLayer(poly);
+        map.fitBounds(poly.getBounds());
+
+        // Markers
+        addLayer(L.marker(start.coords).bindPopup("Start: " + start.name));
+        addLayer(L.marker(end.coords).bindPopup("End: " + end.name));
+
+        summaryDiv.innerHTML = `
+          <div><span class="badge">No Charge Stop Needed</span></div>
+          <b>Vehicle:</b> ${vehicle.label} (${capacity} kWh, ${consumption} kWh/km)<br/>
+          <b>Start battery:</b> ${batteryStartPct.toFixed(0)}%<br/>
+          <b>Estimated distance:</b> ${fmtKm(direct.summary.distance)} km<br/>
+          <b>Drive time:</b> ${fmtMinutes(driveTimeSec)} minutes<br/>
+          <b>Final battery (approx):</b> ${finalPct.toFixed(1)}%<br/>
+          <hr/>
+          <b>Assumptions:</b><br/>
+          &bull; Constant consumption per km<br/>
+          &bull; No traffic or elevation effects<br/>
+          &bull; Reserve: ${MIN_RESERVE_PERCENT}% battery kept as safety
+        `;
+        return;
+      }
+
+      // 2) Need a charging stop: choose midpoint of the direct route and find a station nearby
+      const midIdx = Math.floor(direct.coords.length / 2);
+      const midCoord = direct.coords[midIdx]; // [lon, lat]
+      const midLatLon = [midCoord[1], midCoord[0]];
+
+      const station = await findChargingStationNear(midLatLon);
+      if (!station) {
+        summaryDiv.innerHTML = `
+          Could not find a charging station near the mid-point of the route.<br/>
+          Try a shorter trip or different endpoints.
+        `;
+        return;
+      }
+
+      // 3) Route leg 1: start -> charger
+      const leg1 = await getRouteDirections(start.coords, [station.lat, station.lon]);
+      const leg1Km = leg1.summary.distance / 1000.0;
+      const leg1Energy = leg1Km * consumption;
+      const leg1Time = leg1.summary.duration;
+
+      if (leg1Energy > (startEnergy - reserveEnergy)) {
+        summaryDiv.innerHTML = `
+          <b>Route not feasible with current starting battery.</b><br/>
+          You would likely run out of charge before reaching the first charger.<br/>
+          Try higher starting battery or a closer endpoint.
+        `;
+        return;
+      }
+
+      const energyAfterLeg1 = startEnergy - leg1Energy;
+
+      // Simulate charging: fixed session to CHARGE_TARGET_PERCENT
+      const chargedEnergy = (CHARGE_TARGET_PERCENT / 100.0) * capacity;
+      const chargeTimeSec = CHARGE_SESSION_MINUTES * 60;
+
+      // 4) Route leg 2: charger -> end
+      const leg2 = await getRouteDirections([station.lat, station.lon], end.coords);
+      const leg2Km = leg2.summary.distance / 1000.0;
+      const leg2Energy = leg2Km * consumption;
+      const leg2Time = leg2.summary.duration;
+
+      if (leg2Energy > (chargedEnergy - reserveEnergy)) {
+        summaryDiv.innerHTML = `
+          <b>Cannot complete second leg even after charging to ${CHARGE_TARGET_PERCENT}%.</b><br/>
+          Try a shorter route or assume a larger battery / different vehicle type.
+        `;
+        return;
+      }
+
+      const energyAfterLeg2 = chargedEnergy - leg2Energy;
+      const finalPct = (energyAfterLeg2 / capacity) * 100.0;
+
+      // Draw both legs
+      const latlngs1 = leg1.coords.map(c => [c[1], c[0]]);
+      const latlngs2 = leg2.coords.map(c => [c[1], c[0]]);
+
+      const poly1 = L.polyline(latlngs1, { color: "blue", weight: 5 });
+      const poly2 = L.polyline(latlngs2, { color: "green", weight: 5, dashArray: "5,5" });
+
+      addLayer(poly1);
+      addLayer(poly2);
+      addLayer(L.marker(start.coords).bindPopup("Start: " + start.name));
+      addLayer(L.marker(end.coords).bindPopup("End: " + end.name));
+      addLayer(L.marker([station.lat, station.lon]).bindPopup("Charging stop: " + station.title));
+
+      const groupBounds = L.featureGroup([poly1, poly2]).getBounds();
+      map.fitBounds(groupBounds);
+
+      const totalDistance = leg1.summary.distance + leg2.summary.distance;
+      const totalDriveTime = leg1Time + leg2Time;
+      const totalTime = totalDriveTime + chargeTimeSec;
+
+      summaryDiv.innerHTML = `
+        <div><span class="badge">1 Charge Stop Inserted</span></div>
+        <b>Vehicle:</b> ${vehicle.label} (${capacity} kWh, ${consumption} kWh/km)<br/>
+        <b>Start location:</b> ${start.name}<br/>
+        <b>End location:</b> ${end.name}<br/>
+        <b>Charging at:</b> ${station.title}<br/>
+        <hr/>
+        <b>Leg 1 (to charger)</b><br/>
+        &bull; Distance: ${fmtKm(leg1.summary.distance)} km<br/>
+        &bull; Drive time: ${fmtMinutes(leg1Time)} min<br/>
+        &bull; Battery after leg: ${(energyAfterLeg1 / capacity * 100).toFixed(1)}%<br/>
+        <br/>
+        <b>Charging stop</b><br/>
+        &bull; Target SOC: ${CHARGE_TARGET_PERCENT}%<br/>
+        &bull; Assumed charging time: ${CHARGE_SESSION_MINUTES} min<br/>
+        <br/>
+        <b>Leg 2 (charger → destination)</b><br/>
+        &bull; Distance: ${fmtKm(leg2.summary.distance)} km<br/>
+        &bull; Drive time: ${fmtMinutes(leg2Time)} min<br/>
+        &bull; Final battery: ${finalPct.toFixed(1)}%<br/>
+        <hr/>
+        <b>Total distance:</b> ${fmtKm(totalDistance)} km<br/>
+        <b>Total drive time:</b> ${fmtMinutes(totalDriveTime)} min<br/>
+        <b>Total time incl. charging:</b> ${fmtMinutes(totalTime)} min<br/>
+        <hr/>
+        <b>Assumptions:</b><br/>
+        &bull; Single charging stop near route mid-point<br/>
+        &bull; Fixed ${CHARGE_SESSION_MINUTES} min DC fast charge to ${CHARGE_TARGET_PERCENT}%<br/>
+        &bull; Constant consumption; no traffic, elevation, or weather effects<br/>
+        &bull; Always keep ${MIN_RESERVE_PERCENT}% safety reserve
+      `;
+    } catch (err) {
+      console.error(err);
+      summaryDiv.innerHTML = `
+        <b>Error while planning route:</b><br/>
+        <code>${err.message}</code>
+      `;
+    }
+  }
+
+  document.getElementById("plan-btn").addEventListener("click", planEvRoute);
 </script>
 
 </body>
