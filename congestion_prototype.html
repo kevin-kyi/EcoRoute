@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pittsburgh EV Route Baseline</title>
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #app {
+      display: flex;
+      height: 100%;
+    }
+    #sidebar {
+      width: 320px;
+      padding: 12px;
+      box-sizing: border-box;
+      border-right: 1px solid #ccc;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    #map {
+      flex: 1;
+    }
+    label {
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    select, input {
+      width: 100%;
+      padding: 6px;
+      margin-top: 2px;
+      margin-bottom: 6px;
+      box-sizing: border-box;
+    }
+    button {
+      padding: 8px;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+    #summary {
+      font-size: 0.85rem;
+      margin-top: 8px;
+      padding: 8px;
+      border-radius: 6px;
+      background: #f7f7f7;
+      max-height: 40%;
+      overflow-y: auto;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      margin-right: 4px;
+      background: #e0ecff;
+    }
+
+    /* --- Charger Congestion Forecaster styles --- */
+    .charger-popup {
+      font-size: 0.85rem;
+      max-width: 220px;
+    }
+    .charger-popup h4 {
+      margin: 0 0 4px 0;
+      font-size: 0.95rem;
+    }
+    .congestion-btn {
+      margin: 6px 0;
+      padding: 6px 8px;
+      font-size: 0.8rem;
+      cursor: pointer;
+    }
+    .congestion-status {
+      font-size: 0.8rem;
+      margin-top: 4px;
+      color: #444;
+    }
+    .congestion-chart {
+      margin-top: 6px;
+      border-top: 1px solid #ddd;
+      padding-top: 4px;
+    }
+    .chart-title {
+      font-size: 0.78rem;
+      margin-bottom: 4px;
+      color: #555;
+    }
+    .chart-bars {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      height: 60px;
+    }
+    .chart-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      flex: 1;
+    }
+    .chart-bar {
+      width: 8px;
+      border-radius: 4px 4px 0 0;
+      background: #4c7cff;
+    }
+    .chart-hour {
+      font-size: 0.7rem;
+      margin-top: 2px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="app">
+  <div id="sidebar">
+    <h3>EV Route Baseline – Pittsburgh</h3>
+
+    <div>
+      <label for="start-select">Start Location</label>
+      <select id="start-select">
+        <option value="point_state_park">Point State Park</option>
+        <option value="cmu">Carnegie Mellon University</option>
+        <option value="pitt">University of Pittsburgh (Cathedral of Learning)</option>
+        <option value="airport">Pittsburgh International Airport</option>
+      </select>
+    </div>
+
+    <div>
+      <label for="end-select">End Location</label>
+      <select id="end-select">
+        <option value="cmu">Carnegie Mellon University</option>
+        <option value="point_state_park">Point State Park</option>
+        <option value="pitt">University of Pittsburgh (Cathedral of Learning)</option>
+        <option value="airport">Pittsburgh International Airport</option>
+      </select>
+    </div>
+
+    <div>
+      <label for="battery-input">Battery at Start (%)</label>
+      <input id="battery-input" type="number" min="5" max="100" value="60" />
+    </div>
+
+    <div>
+      <label for="vehicle-select">Vehicle Type</label>
+      <select id="vehicle-select">
+        <option value="compact">Compact (50 kWh, 0.15 kWh/km)</option>
+        <option value="sedan" selected>Sedan (60 kWh, 0.18 kWh/km)</option>
+        <option value="suv">SUV (75 kWh, 0.22 kWh/km)</option>
+      </select>
+    </div>
+
+    <button id="plan-btn">Plan EV Route</button>
+
+    <div id="summary">
+      <em>Fill in parameters and click “Plan EV Route” to see a baseline route.</em>
+      <br/><br/>
+      <strong>Charger Congestion Prototype:</strong><br/>
+      Click any of the charger pins on the map to report congestion and see a sample “busy times” chart.
+    </div>
+  </div>
+
+  <div id="map"></div>
+</div>
+
+<!-- Leaflet JS -->
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  crossorigin=""
+></script>
+
+<script>
+  // ========= CONFIG: PUT YOUR API KEYS HERE =========
+  const ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImNhMzQ5ZjcwOTk2MjRlYjhhODRhMDg5NmJlNDg5Nzc2IiwiaCI6Im11cm11cjY0In0=";
+  const OCM_API_KEY = "6050848c-e5f2-4368-bdf6-af9b90b26dbe";
+
+  // ========= SIMPLE DATA MODELS =========
+
+  // Hard-coded Pittsburgh landmarks (lat, lon)
+  const LOCATIONS = {
+    point_state_park: { name: "Point State Park", coords: [40.4414, -80.0089] },
+    cmu:              { name: "Carnegie Mellon University", coords: [40.4445, -79.9436] },
+    pitt:             { name: "University of Pittsburgh", coords: [40.4440, -79.9607] },
+    airport:          { name: "Pittsburgh International Airport", coords: [40.4950, -80.2560] }
+  };
+
+  // Very simple vehicle models (capacity in kWh, consumption in kWh per km)
+  const VEHICLES = {
+    compact: { label: "Compact", capacity: 50, consumption: 0.15 },
+    sedan:   { label: "Sedan",   capacity: 60, consumption: 0.18 },
+    suv:     { label: "SUV",     capacity: 75, consumption: 0.22 }
+  };
+
+  // Safety reserve: minimum SOC (%) we want to keep at all times
+  const MIN_RESERVE_PERCENT = 10;
+
+  // Assumed fixed DC fast charging session (for baseline demo)
+  const CHARGE_TARGET_PERCENT = 80;
+  const CHARGE_SESSION_MINUTES = 30;
+
+  // ========= LEAFLET MAP SETUP =========
+  const map = L.map("map").setView([40.44, -79.99], 12);
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors"
+  }).addTo(map);
+
+  let routeLayers = [];  // keep track of current route polylines / markers
+
+  function clearMap() {
+    routeLayers.forEach(l => map.removeLayer(l));
+    routeLayers = [];
+  }
+
+  function addLayer(layer) {
+    routeLayers.push(layer);
+    layer.addTo(map);
+  }
+
+  const summaryDiv = document.getElementById("summary");
+
+  // ========= CHARGER CONGESTION FORECASTER DEMO =========
+
+  // Three hard-coded example chargers in Pittsburgh area
+  const DEMO_CHARGERS = [
+    {
+      id: "charger1",
+      name: "Downtown Fast Charger",
+      coords: [40.4415, -80.0005],
+      description: "Level 3 DC fast charger near downtown garages.",
+      // relative congestion intensity per hour block (0–100)
+      profile: [10, 20, 40, 70, 90, 60], // e.g., 8am→6pm
+      hours: ["8a", "10a", "12p", "2p", "4p", "6p"]
+    },
+    {
+      id: "charger2",
+      name: "Oakland Community Charger",
+      coords: [40.4436, -79.9540],
+      description: "Community charger near universities and apartments.",
+      profile: [20, 50, 80, 80, 50, 30],
+      hours: ["8a", "10a", "12p", "2p", "4p", "6p"]
+    },
+    {
+      id: "charger3",
+      name: "East Liberty Shopping Charger",
+      coords: [40.4605, -79.9205],
+      description: "Charger in a shopping area lot.",
+      profile: [5, 15, 40, 60, 75, 50],
+      hours: ["8a", "10a", "12p", "2p", "4p", "6p"]
+    }
+  ];
+
+  // Generate a tiny bar chart HTML for the congestion profile
+  function generateChartHtml(profile, hours, chargerId) {
+    const bars = profile.map((val, idx) => {
+      const height = 10 + (val / 100) * 50; // min 10px, max ~60px
+      const hour = hours[idx] || "";
+      return `
+        <div class="chart-col">
+          <div class="chart-bar" style="height:${height.toFixed(0)}px"></div>
+          <div class="chart-hour">${hour}</div>
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div class="congestion-chart">
+        <div class="chart-title">Typical congestion by time of day</div>
+        <div class="chart-bars">
+          ${bars}
+        </div>
+        <div id="status-${chargerId}" class="congestion-status">
+          Current status: not reported
+        </div>
+      </div>
+    `;
+  }
+
+  // Global function for the inline button onclick
+  window.reportCongestion = function(chargerId) {
+    const statusDiv = document.getElementById("status-" + chargerId);
+    if (statusDiv) {
+      statusDiv.textContent = "Thank you! Marked as congested right now (demo only).";
+    }
+  };
+
+  function createDemoChargerMarkers() {
+    DEMO_CHARGERS.forEach(ch => {
+      const chartHtml = generateChartHtml(ch.profile, ch.hours, ch.id);
+      const popupHtml = `
+        <div class="charger-popup">
+          <h4>${ch.name}</h4>
+          <div>${ch.description}</div>
+          <button class="congestion-btn" onclick="reportCongestion('${ch.id}')">
+            Report: Congested Now
+          </button>
+          ${chartHtml}
+        </div>
+      `;
+      const marker = L.marker(ch.coords, { title: ch.name });
+      marker.bindPopup(popupHtml);
+      marker.addTo(map); // Note: not added to routeLayers so they persist across plans
+    });
+  }
+
+  // Create congestion demo markers once on load
+  createDemoChargerMarkers();
+
+  // ========= HELPER FUNCTIONS =========
+
+  function toLonLat(latlon) {
+    return [latlon[1], latlon[0]];
+  }
+
+  function fmtMinutes(seconds) {
+    return (seconds / 60).toFixed(1);
+  }
+
+  function fmtKm(meters) {
+    return (meters / 1000).toFixed(1);
+  }
+
+  // Call OpenRouteService directions API
+  async function getRouteDirections(startLatLon, endLatLon) {
+    const body = {
+      coordinates: [
+        toLonLat(startLatLon),
+        toLonLat(endLatLon)
+      ]
+    };
+
+    const res = await fetch("https://api.openrouteservice.org/v2/directions/driving-car/geojson", {
+      method: "POST",
+      headers: {
+        "Authorization": ORS_API_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error("ORS error: " + res.status + " - " + txt);
+    }
+
+    const json = await res.json();
+    const feature = json.features[0];
+    const coords = feature.geometry.coordinates;
+    const summary = feature.properties.summary;
+    return { coords, summary };
+  }
+
+  // Query Open Charge Map near a coordinate (lat, lon)
+  async function findChargingStationNear(latlon) {
+    const [lat, lon] = latlon;
+    const params = new URLSearchParams({
+      output: "json",
+      latitude: lat.toString(),
+      longitude: lon.toString(),
+      distance: "5",
+      distanceunit: "KM",
+      maxresults: "1",
+      key: OCM_API_KEY
+    });
+
+    const url = "https://api.openchargemap.io/v3/poi/?" + params.toString();
+    const res = await fetch(url);
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error("OCM error: " + res.status + " - " + txt);
+    }
+
+    const arr = await res.json();
+    if (!arr || arr.length === 0) {
+      return null;
+    }
+
+    const poi = arr[0];
+    const clat = poi.AddressInfo.Latitude;
+    const clon = poi.AddressInfo.Longitude;
+    const title = poi.AddressInfo.Title || "Charging Station";
+    return { lat: clat, lon: clon, title };
+  }
+
+  // ========= CORE EV LOGIC =========
+  async function planEvRoute() {
+    clearMap();
+    summaryDiv.innerHTML = "<em>Planning route...</em>";
+
+    const startKey = document.getElementById("start-select").value;
+    const endKey = document.getElementById("end-select").value;
+    const batteryStartPct = parseFloat(document.getElementById("battery-input").value);
+    const vehicleKey = document.getElementById("vehicle-select").value;
+
+    if (!LOCATIONS[startKey] || !LOCATIONS[endKey]) {
+      summaryDiv.innerHTML = "Invalid start or end location.";
+      return;
+    }
+
+    if (isNaN(batteryStartPct) || batteryStartPct < 5 || batteryStartPct > 100) {
+      summaryDiv.innerHTML = "Please enter a starting battery between 5 and 100.";
+      return;
+    }
+
+    const start = LOCATIONS[startKey];
+    const end = LOCATIONS[endKey];
+    const vehicle = VEHICLES[vehicleKey];
+
+    const capacity = vehicle.capacity;
+    const consumption = vehicle.consumption;
+
+    const startEnergy = (batteryStartPct / 100.0) * capacity;
+    const reserveEnergy = (MIN_RESERVE_PERCENT / 100.0) * capacity;
+
+    try {
+      // 1) Direct route first
+      const direct = await getRouteDirections(start.coords, end.coords);
+      const distanceKm = direct.summary.distance / 1000.0;
+      const driveEnergy = distanceKm * consumption;
+      const driveTimeSec = direct.summary.duration;
+
+      if (driveEnergy <= (startEnergy - reserveEnergy)) {
+        const finalEnergy = startEnergy - driveEnergy;
+        const finalPct = (finalEnergy / capacity) * 100.0;
+
+        const latlngs = direct.coords.map(c => [c[1], c[0]]);
+        const poly = L.polyline(latlngs, { color: "blue", weight: 5 });
+        addLayer(poly);
+        map.fitBounds(poly.getBounds());
+
+        addLayer(L.marker(start.coords).bindPopup("Start: " + start.name));
+        addLayer(L.marker(end.coords).bindPopup("End: " + end.name));
+
+        summaryDiv.innerHTML = `
+          <div><span class="badge">No Charge Stop Needed</span></div>
+          <b>Vehicle:</b> ${vehicle.label} (${capacity} kWh, ${consumption} kWh/km)<br/>
+          <b>Start battery:</b> ${batteryStartPct.toFixed(0)}%<br/>
+          <b>Estimated distance:</b> ${fmtKm(direct.summary.distance)} km<br/>
+          <b>Drive time:</b> ${fmtMinutes(driveTimeSec)} minutes<br/>
+          <b>Final battery (approx):</b> ${finalPct.toFixed(1)}%<br/>
+          <hr/>
+          <b>Assumptions:</b><br/>
+          &bull; Constant consumption per km<br/>
+          &bull; No traffic or elevation effects<br/>
+          &bull; Reserve: ${MIN_RESERVE_PERCENT}% battery kept as safety
+        `;
+        return;
+      }
+
+      // 2) Need a charging stop: choose midpoint of the direct route and find a station nearby
+      const midIdx = Math.floor(direct.coords.length / 2);
+      const midCoord = direct.coords[midIdx];
+      const midLatLon = [midCoord[1], midCoord[0]];
+
+      const station = await findChargingStationNear(midLatLon);
+      if (!station) {
+        summaryDiv.innerHTML = `
+          Could not find a charging station near the mid-point of the route.<br/>
+          Try a shorter trip or different endpoints.
+        `;
+        return;
+      }
+
+      // 3) Route leg 1: start -> charger
+      const leg1 = await getRouteDirections(start.coords, [station.lat, station.lon]);
+      const leg1Km = leg1.summary.distance / 1000.0;
+      const leg1Energy = leg1Km * consumption;
+      const leg1Time = leg1.summary.duration;
+
+      if (leg1Energy > (startEnergy - reserveEnergy)) {
+        summaryDiv.innerHTML = `
+          <b>Route not feasible with current starting battery.</b><br/>
+          You would likely run out of charge before reaching the first charger.<br/>
+          Try higher starting battery or a closer endpoint.
+        `;
+        return;
+      }
+
+      const energyAfterLeg1 = startEnergy - leg1Energy;
+
+      const chargedEnergy = (CHARGE_TARGET_PERCENT / 100.0) * capacity;
+      const chargeTimeSec = CHARGE_SESSION_MINUTES * 60;
+
+      // 4) Route leg 2: charger -> end
+      const leg2 = await getRouteDirections([station.lat, station.lon], end.coords);
+      const leg2Km = leg2.summary.distance / 1000.0;
+      const leg2Energy = leg2Km * consumption;
+      const leg2Time = leg2.summary.duration;
+
+      if (leg2Energy > (chargedEnergy - reserveEnergy)) {
+        summaryDiv.innerHTML = `
+          <b>Cannot complete second leg even after charging to ${CHARGE_TARGET_PERCENT}%.</b><br/>
+          Try a shorter route or assume a larger battery / different vehicle type.
+        `;
+        return;
+      }
+
+      const energyAfterLeg2 = chargedEnergy - leg2Energy;
+      const finalPct = (energyAfterLeg2 / capacity) * 100.0;
+
+      const latlngs1 = leg1.coords.map(c => [c[1], c[0]]);
+      const latlngs2 = leg2.coords.map(c => [c[1], c[0]]);
+
+      const poly1 = L.polyline(latlngs1, { color: "blue", weight: 5 });
+      const poly2 = L.polyline(latlngs2, { color: "green", weight: 5, dashArray: "5,5" });
+
+      addLayer(poly1);
+      addLayer(poly2);
+      addLayer(L.marker(start.coords).bindPopup("Start: " + start.name));
+      addLayer(L.marker(end.coords).bindPopup("End: " + end.name));
+      addLayer(L.marker([station.lat, station.lon]).bindPopup("Charging stop: " + station.title));
+
+      const groupBounds = L.featureGroup([poly1, poly2]).getBounds();
+      map.fitBounds(groupBounds);
+
+      const totalDistance = leg1.summary.distance + leg2.summary.distance;
+      const totalDriveTime = leg1Time + leg2Time;
+      const totalTime = totalDriveTime + chargeTimeSec;
+
+      summaryDiv.innerHTML = `
+        <div><span class="badge">1 Charge Stop Inserted</span></div>
+        <b>Vehicle:</b> ${vehicle.label} (${capacity} kWh, ${consumption} kWh/km)<br/>
+        <b>Start location:</b> ${start.name}<br/>
+        <b>End location:</b> ${end.name}<br/>
+        <b>Charging at:</b> ${station.title}<br/>
+        <hr/>
+        <b>Leg 1 (to charger)</b><br/>
+        &bull; Distance: ${fmtKm(leg1.summary.distance)} km<br/>
+        &bull; Drive time: ${fmtMinutes(leg1Time)} min<br/>
+        &bull; Battery after leg: ${(energyAfterLeg1 / capacity * 100).toFixed(1)}%<br/>
+        <br/>
+        <b>Charging stop</b><br/>
+        &bull; Target SOC: ${CHARGE_TARGET_PERCENT}%<br/>
+        &bull; Assumed charging time: ${CHARGE_SESSION_MINUTES} min<br/>
+        <br/>
+        <b>Leg 2 (charger → destination)</b><br/>
+        &bull; Distance: ${fmtKm(leg2.summary.distance)} km<br/>
+        &bull; Drive time: ${fmtMinutes(leg2Time)} min<br/>
+        &bull; Final battery: ${finalPct.toFixed(1)}%<br/>
+        <hr/>
+        <b>Total distance:</b> ${fmtKm(totalDistance)} km<br/>
+        <b>Total drive time:</b> ${fmtMinutes(totalDriveTime)} min<br/>
+        <b>Total time incl. charging:</b> ${fmtMinutes(totalTime)} min<br/>
+        <hr/>
+        <b>Assumptions:</b><br/>
+        &bull; Single charging stop near route mid-point<br/>
+        &bull; Fixed ${CHARGE_SESSION_MINUTES} min DC fast charge to ${CHARGE_TARGET_PERCENT}%<br/>
+        &bull; Constant consumption; no traffic, elevation, or weather effects<br/>
+        &bull; Always keep ${MIN_RESERVE_PERCENT}% safety reserve
+      `;
+    } catch (err) {
+      console.error(err);
+      summaryDiv.innerHTML = `
+        <b>Error while planning route:</b><br/>
+        <code>${err.message}</code>
+      `;
+    }
+  }
+
+  document.getElementById("plan-btn").addEventListener("click", planEvRoute);
+</script>
+
+</body>
+</html>
+
