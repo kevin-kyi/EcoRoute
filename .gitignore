@@ -1,0 +1,7 @@
+data/
+eved_extracted/
+__pycache__/
+*.csv
+*.zip
+*.7z
+.DS_Store
