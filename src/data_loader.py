@@ -2,110 +2,184 @@ import pandas as pd
 import numpy as np
 import os
 import glob
-import subprocess
 import zipfile
+import sys
 
 # CONFIGURATION
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-VED_REPO_URL = "https://github.com/gsoh/VED.git"
-EVED_REPO_URL = "https://Datarepo@bitbucket.org/datarepo/eved-dataset.git"
+
+def print_status(msg):
+    """Helper to force print output to terminal immediately"""
+    print(f"[LOADER] {msg}", flush=True)
 
 def setup_directories():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
-        print(f"Created data directory: {DATA_DIR}")
-
-def clone_repos():
-    """Clones VED and eVED if they don't exist."""
-    # 1. Clone VED
-    ved_path = os.path.join(DATA_DIR, "VED")
-    if not os.path.exists(ved_path):
-        print("Cloning VED (Static Data)...")
-        subprocess.run(["git", "clone", VED_REPO_URL, ved_path], check=True)
-    
-    # 2. Clone eVED
-    eved_path = os.path.join(DATA_DIR, "eved-dataset")
-    if not os.path.exists(eved_path):
-        print("Cloning eVED (Dynamic Data)...")
-        subprocess.run(["git", "clone", EVED_REPO_URL, eved_path], check=True)
 
 def extract_eved_data():
     """Finds the zip file and extracts it."""
     zip_path = os.path.join(DATA_DIR, "eved-dataset", "data", "eVED.zip")
     extract_path = os.path.join(DATA_DIR, "eved_extracted")
     
+    # Logic: If extract folder doesn't exist OR is empty, run unzip
     if os.path.exists(zip_path):
-        if not os.path.exists(extract_path):
-            print(f"Unzipping eVED data to {extract_path}...")
+        if not os.path.exists(extract_path) or not os.listdir(extract_path):
+            print_status(f"📦 Unzipping eVED data to {extract_path}...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_path)
-    else:
-        print(f" Warning: Could not find {zip_path}. Check if clone was successful.")
     return extract_path
 
-def load_and_process_data(nrows=50000):
-    """Main function to load, merge, and return the training DataFrame."""
+def load_and_process_data(nrows=None):
+    print_status("🚀 STARTING DATA PIPELINE...")
     
-    # 1. Setup
+    # 1. Setup & Load Registry
     setup_directories()
-    clone_repos()
     extract_path = extract_eved_data()
     
-    # 2. Load Static Registry (Vehicle Weights)
-    print("\nLoading Vehicle Registry...")
+    print_status("🚗 Loading Vehicle Registry...")
     static_file = os.path.join(DATA_DIR, "VED", "Data", "VED_Static_Data_PHEV&EV.xlsx")
     
     try:
         static_df = pd.read_excel(static_file)
+        # Create Registry
         vehicle_registry = pd.DataFrame()
         vehicle_registry['Vehicle_ID'] = static_df['VehId']
         vehicle_registry['Weight_kg'] = static_df['Generalized_Weight'] * 0.453592
         vehicle_registry['Type'] = static_df['EngineType']
-    except Exception as e:
-        print(f"Error loading VED Excel: {e}")
-        return None
-
-    # 3. Load Dynamic Trip Data
-    print(f"📉 Loading Trip Data (Limit: {nrows} rows)...")
-    csv_files = glob.glob(f"{extract_path}/**/*.csv", recursive=True)
-    
-    if not csv_files:
-        print("No CSV files found. Extraction might have failed.")
-        return None
         
-    target_csv = max(csv_files, key=os.path.getsize)
-    
-    # Read CSV
-    try:
-        trips_df = pd.read_csv(target_csv, nrows=nrows)
+        valid_ev_ids = set(vehicle_registry['Vehicle_ID'].unique())
+        print_status(f"-> Found {len(valid_ev_ids)} valid EV IDs in registry.")
     except Exception as e:
-        print(f"Error reading CSV: {e}")
+        print_status(f"❌ Error loading VED Excel: {e}")
         return None
 
-    # 4. Map Columns (Using the EXACT names we found in validation)
+    # 2. Find Trip Data
+    print_status("📉 Finding EV Trips in CSV...")
+    csv_files = glob.glob(f"{extract_path}/**/*.csv", recursive=True)
+    if not csv_files:
+        print_status("❌ No CSV files found. Check 'eved_extracted' folder.")
+        return None
+    
+    target_csv = max(csv_files, key=os.path.getsize)
+    print_status(f"-> Target File: {os.path.basename(target_csv)}")
+
+    # 3. CHUNK PROCESSING (The Sifter)
+    print_status("-> Scanning file for EVs (this takes 10-20s)...")
+    chunk_size = 100000
+    chunks = []
+    total_rows_checked = 0
+    
+    try:
+        # Loop through file
+        for i, chunk in enumerate(pd.read_csv(target_csv, chunksize=chunk_size, low_memory=False)):
+            total_rows_checked += len(chunk)
+            
+            # Find the Vehicle ID column (It changes names sometimes)
+            cols = chunk.columns
+            veh_col = next((c for c in cols if 'VehId' in c), None)
+            
+            if veh_col:
+                # FILTER: Keep only IDs that match our EV Registry
+                ev_chunk = chunk[chunk[veh_col].isin(valid_ev_ids)].copy()
+                
+                if not ev_chunk.empty:
+                    chunks.append(ev_chunk)
+                    # Print a dot every 5 chunks to show life
+                    if i % 5 == 0: print(".", end="", flush=True)
+            
+            # Optional: Stop early if we just need a subset for testing
+            if nrows and total_rows_checked >= nrows * 10: 
+                break
+                
+        print() # New line after dots
+    except Exception as e:
+        print_status(f"❌ Error reading CSV chunks: {e}")
+        return None
+
+    if not chunks:
+        print_status("❌ CRITICAL: No matching EV data found in file.")
+        return None
+
+    trips_df = pd.concat(chunks)
+    print_status(f"-> Aggregated {len(trips_df)} raw EV rows.")
+
+    # 4. Standardize Column Names
     column_map = {
         'VehId': 'Vehicle_ID',
         'Vehicle Speed[km/h]': 'Speed_kmh',
         'Gradient': 'Road_Slope_pct',       
         'OAT[DegC]': 'Ambient_Temp_C',      
         'HV Battery Current[A]': 'Current_A',
-        'HV Battery Voltage[V]': 'Voltage_V'
+        'HV Battery Voltage[V]': 'Voltage_V',
+        'Timestamp(ms)': 'Timestamp_ms'
     }
+    # Handle Trip ID name variations
+    if 'Trip' in trips_df.columns: column_map['Trip'] = 'Trip_ID'
+    elif 'DayNum' in trips_df.columns: column_map['DayNum'] = 'Trip_ID'
     
-    # Rename only columns that exist
     trips_df = trips_df.rename(columns={k:v for k,v in column_map.items() if k in trips_df.columns})
     
-    # 5. Merge
+    # 5. Merge & Feature Engineering
     final_df = trips_df.merge(vehicle_registry, on='Vehicle_ID', how='inner')
     
-    # 6. Calculate Target
-    if 'Voltage_V' in final_df.columns and 'Current_A' in final_df.columns:
-        final_df['Instant_Power_kW'] = (final_df['Voltage_V'] * final_df['Current_A']) / 1000
+    print_status("⚙️ Engineering Physics Features...")
     
-    print(f"Data Pipeline Complete. Loaded {len(final_df)} samples.")
+    # A. FLIP SIGN: Consumption = Positive
+    # VED data uses Negative for discharge. We multiply by -1 to make it intuitive.
+    final_df['Instant_Power_kW'] = -1 * (final_df['Voltage_V'] * final_df['Current_A']) / 1000
+
+    # B. SMOOTH SPEED & ACCEL
+    # We sort to ensure time is sequential
+    if 'Timestamp_ms' in final_df.columns:
+        final_df = final_df.sort_values(by=['Vehicle_ID', 'Trip_ID', 'Timestamp_ms'])
+        
+        grouped = final_df.groupby(['Vehicle_ID', 'Trip_ID'])
+        
+        # Smooth Speed (removes GPS noise)
+        final_df['Speed_Smooth'] = grouped['Speed_kmh'].transform(
+            lambda x: x.rolling(window=5, center=True).mean()
+        ).fillna(final_df['Speed_kmh'])
+
+        # Calculate Accel from Smooth Speed
+        final_df['Speed_m_s'] = final_df['Speed_Smooth'] / 3.6
+        final_df['Delta_Speed'] = grouped['Speed_m_s'].diff()
+        final_df['Delta_Time'] = grouped['Timestamp_ms'].diff() / 1000
+        
+        # Calculate Accel (Handle divide by zero)
+        final_df['Acceleration_m_s2'] = (final_df['Delta_Speed'] / final_df['Delta_Time']).replace([np.inf, -np.inf], 0)
+    else:
+        # Fallback if timestamp missing
+        grouped = final_df.groupby(['Vehicle_ID', 'Trip_ID'])
+        final_df['Speed_Smooth'] = final_df['Speed_kmh']
+        final_df['Acceleration_m_s2'] = grouped['Speed_kmh'].diff() / 3.6
+
+    # C. Target Smoothing
+    final_df['Instant_Power_kW'] = grouped['Instant_Power_kW'].transform(
+        lambda x: x.rolling(window=5, center=True).mean()
+    )
+    
+    # ---------------------------------------------------------
+    # 🏁 THE CRITICAL FIX: Targeted DropNA 🏁
+    # ---------------------------------------------------------
+    print_status(f"-> Rows before cleaning: {len(final_df)}")
+    
+    # Only drop rows if PHYSICS variables are missing.
+    # We DO NOT drop rows if 'Fuel Rate' or 'Engine RPM' are missing (which they are for EVs!)
+    essential_cols = ['Speed_Smooth', 'Road_Slope_pct', 'Ambient_Temp_C', 'Weight_kg', 'Instant_Power_kW', 'Acceleration_m_s2']
+    final_df = final_df.dropna(subset=essential_cols)
+    
+    # Filter Logic
+    final_df = final_df[final_df['Speed_Smooth'] > 1] # Remove Idling
+    final_df = final_df[
+        (final_df['Instant_Power_kW'] < 250) & 
+        (final_df['Instant_Power_kW'] > -100)
+    ]
+
+    print_status(f"✅ Data Pipeline Complete. Loaded {len(final_df)} clean samples.")
     return final_df
 
 if __name__ == "__main__":
-    # Test run if executed directly
-    df = load_and_process_data(nrows=1000)
-    print(df.head())
+    # Test Run
+    df = load_and_process_data(nrows=50000)
+    if df is not None:
+        print(df[['Speed_Smooth', 'Acceleration_m_s2', 'Instant_Power_kW']].head())

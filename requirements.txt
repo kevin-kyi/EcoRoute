@@ -5,3 +5,7 @@ matplotlib
 scikit-learn
 xgboost
 requests
+streamlit
+folium
+streamlit-folium
+openrouteservice 
