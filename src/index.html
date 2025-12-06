@@ -5,7 +5,6 @@
   <title>Project 2: EV Route Optimizer (Final)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
-    /* ... (Your existing styles remain the same) ... */
     html, body { margin: 0; height: 100%; font-family: sans-serif; }
     #app { display: flex; height: 100%; }
     #sidebar { width: 340px; padding: 15px; border-right: 1px solid #ccc; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
@@ -149,9 +148,7 @@
       const currentKwh = (currentPct / 100) * batteryCap;
       const neededKwh = distanceKm * kwhPerKm;
       
-      // LOGIC CHECK: Can we make it?
       if (currentKwh > neededKwh) {
-        // SUCCESS: DIRECT ROUTE
         const poly = L.geoJSON(routeGeo, { style: { color: 'blue', weight: 5 } }).addTo(map);
         mapLayers.push(poly);
         map.fitBounds(poly.getBounds());

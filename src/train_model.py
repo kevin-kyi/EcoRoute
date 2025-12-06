@@ -15,21 +15,19 @@ MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 def train_ev_model():
-    print("🚀 STARTING MODEL TRAINING PIPELINE")
+    print("STARTING MODEL TRAINING PIPELINE")
     print("-" * 40)
 
-    # 1. LOAD DATA (Increase nrows for better accuracy if your PC can handle it)
-    # 200,000 rows gives a much better distribution than 50k
+    # 1. LOAD DATA 
     df = load_and_process_data(nrows=200000)
     
     if df is None or df.empty:
-        print("❌ Error: No data loaded.")
+        print("Error: No data loaded.")
         return
 
     # 2. DEFINE FEATURES & TARGET
-    # We now include Acceleration, which is critical for F=ma
     features = [
-        'Speed_Smooth',      # <--- Use the smoothed speed!
+        'Speed_Smooth',     
         'Road_Slope_pct', 
         'Ambient_Temp_C', 
         'Weight_kg', 
@@ -46,22 +44,22 @@ def train_ev_model():
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # 3. TRAIN XGBOOST MODEL
-    print("\n🧠 Training XGBoost Regressor...")
+    print("\nTraining XGBoost Regressor...")
     
     model = xgb.XGBRegressor(
-        n_estimators=500,       # More trees for better detail
-        learning_rate=0.05,     # Slower learning = better generalization
-        max_depth=7,            # Depth 7 captures complex interactions
-        subsample=0.8,          # Prevent overfitting
+        n_estimators=3000,       
+        learning_rate=0.015,     
+        max_depth=10,            
+        subsample=0.75,          
         colsample_bytree=0.8,   
-        n_jobs=-1,              # Use all CPU cores
+        n_jobs=-1,              
         random_state=42
     )
     
     model.fit(X_train, y_train)
 
     # 4. EVALUATE PERFORMANCE
-    print("\n📊 Evaluation Results:")
+    print("\nEvaluation Results:")
     preds = model.predict(X_test)
     
     mae = mean_absolute_error(y_test, preds)
@@ -71,16 +69,15 @@ def train_ev_model():
     print(f"   -> R² Score:            {r2:.3f}")
     
     if r2 > 0.6:
-        print("   ✅ SUCCESS: Model is predictive.")
+        print("   SUCCESS: Model is predictive.")
     else:
-        print("   ⚠️ WARNING: Score is low. Check if 'Acceleration' logic is working.")
+        print("   WARNING: Score is low. Check if 'Acceleration' logic is working.")
 
     # 5. SAVE THE MODEL
     model_path = os.path.join(MODEL_DIR, "ev_energy_model.json")
     model.save_model(model_path)
-    print(f"\n💾 Model saved to: {model_path}")
+    print(f"\nModel saved to: {model_path}")
 
-    # 6. VISUALIZATION (For your Report)
     plt.figure(figsize=(10, 6))
     # Plot just 100 points so the chart is readable
     plt.scatter(y_test[:100], preds[:100], alpha=0.6, color='blue', label='Predictions')

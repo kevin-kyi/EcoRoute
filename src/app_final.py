@@ -30,6 +30,28 @@ def load_model():
         return model
     return None
 
+def get_live_weather(lat, lon):
+    """
+    Fetches current temperature from Open-Meteo (Free).
+    Returns 20.0 (deg C) if the API fails.
+    """
+    try:
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m"
+        }
+        # Short timeout so app doesn't hang if API is down
+        resp = requests.get(url, params=params, timeout=3)
+        resp.raise_for_status()
+        data = resp.json()
+        print (f"CURRENT TEMPERATURE: {data['current']['temperature_2m']}")
+        return data['current']['temperature_2m']
+    except Exception as e:
+        print(f"Weather API Error: {e}")
+        return 20.0 # Fallback to standard room temp
+
 def calculate_ascent(coords):
     if not coords or len(coords[0]) < 3: return 0
     total_ascent = 0
@@ -38,10 +60,14 @@ def calculate_ascent(coords):
         if diff > 0: total_ascent += diff
     return total_ascent
 
-def predict_energy_with_model(model, segments, weight_kg):
+def predict_energy_with_model(model, segments, weight_kg, temp_c=20):
+    """
+    Predicts energy usage.
+    'temp_c' to adjust for weather conditions.
+    """
     df = pd.DataFrame(segments)
     df['Weight_kg'] = weight_kg
-    df['Ambient_Temp_C'] = 20  
+    df['Ambient_Temp_C'] = temp_c  
     
     features = ['Speed_Smooth', 'Road_Slope_pct', 'Ambient_Temp_C', 'Weight_kg', 'Acceleration_m_s2']
     for f in features:
@@ -114,26 +140,31 @@ if run_btn:
     st.session_state.best_route_stats = None
 
     if not model:
-        st.error("❌ Model not found! Please run 'train_model.py' first.")
+        st.error("Model not found! Please run 'train_model.py' first.")
     else:
         with st.status("Thinking...", expanded=True) as status:
             try:
                 client = openrouteservice.Client(key=ORS_API_KEY)
                 
                 # 1. Geocode
-                status.write("📍 Geocoding addresses...")
+                status.write("Geocoding addresses...")
                 search_start = start_loc if "Pittsburgh" in start_loc else f"{start_loc}, Pittsburgh, PA"
                 search_end = end_loc if "Pittsburgh" in end_loc else f"{end_loc}, Pittsburgh, PA"
                 
                 start_geo = client.pelias_search(text=search_start, rect_min_x=PGH_BBOX[0], rect_min_y=PGH_BBOX[1], rect_max_x=PGH_BBOX[2], rect_max_y=PGH_BBOX[3])['features'][0]
                 end_geo = client.pelias_search(text=search_end, rect_min_x=PGH_BBOX[0], rect_min_y=PGH_BBOX[1], rect_max_x=PGH_BBOX[2], rect_max_y=PGH_BBOX[3])['features'][0]
                 
+                # ORS returns [lon, lat]
                 start_coords = start_geo['geometry']['coordinates']
                 end_coords = end_geo['geometry']['coordinates']
                 st.info(f"Route: {start_geo['properties']['label']} ➝ {end_geo['properties']['label']}")
+
+                status.write("Fetching live weather data...")
+                current_temp = get_live_weather(start_coords[1], start_coords[0])
+                st.caption(f"Current Temperature: **{current_temp}°C** (Used for battery physics)")
                 
                 # 2. Get Routes
-                status.write(f"🛣️ Fetching alternatives...")
+                status.write(f"Fetching alternatives...")
                 try:
                     routes = client.directions(
                         coordinates=[start_coords, end_coords],
@@ -142,7 +173,7 @@ if run_btn:
                         alternative_routes={"target_count": n_routes}
                     )
                 except:
-                    status.write("⚠️ Switching to Single Route...")
+                    status.write("Switching to Single Route...")
                     routes = client.directions(
                         coordinates=[start_coords, end_coords],
                         profile='driving-car', format='geojson',
@@ -150,7 +181,7 @@ if run_btn:
                     )
                 
                 # 3. Analyze Routes
-                status.write("🧠 Running XGBoost Physics Model...")
+                status.write("Running XGBoost Physics Model...")
                 candidates = []
                 best_route = None
                 min_energy = float('inf')
@@ -165,14 +196,18 @@ if run_btn:
                     ascent = calculate_ascent(coords)
                     
                     segments = generate_simulated_segments(duration_s)
-                    pred_kwh = predict_energy_with_model(model, segments, weight_kg)
+                    
+                    # PASS CURRENT TEMP TO PREDICTION
+                    pred_kwh = predict_energy_with_model(model, segments, weight_kg, temp_c=current_temp)
+                    
                     rated_kwh = dist_km * efficiency_rated
                     
                     candidates.append({
                         'id': i, 'kwh': pred_kwh, 'rated_kwh': rated_kwh,
                         'dist': dist_km, 'time_min': duration_s/60,
                         'ascent': ascent,
-                        'geo': r, 'coords': coords
+                        'geo': r, 'coords': coords,
+                        'temp': current_temp 
                     })
                     
                     if pred_kwh < min_energy:
@@ -209,8 +244,9 @@ if run_btn:
                         leg1_sum = leg1['features'][0]['properties']['summary']
                         leg2_sum = leg2['features'][0]['properties']['summary']
                         
-                        leg1_kwh = predict_energy_with_model(model, generate_simulated_segments(leg1_sum['duration']), weight_kg)
-                        leg2_kwh = predict_energy_with_model(model, generate_simulated_segments(leg2_sum['duration']), weight_kg)
+                        # Pass temp to legs too
+                        leg1_kwh = predict_energy_with_model(model, generate_simulated_segments(leg1_sum['duration']), weight_kg, temp_c=current_temp)
+                        leg2_kwh = predict_energy_with_model(model, generate_simulated_segments(leg2_sum['duration']), weight_kg, temp_c=current_temp)
                         
                         l1_ascent = calculate_ascent(leg1['features'][0]['geometry']['coordinates'])
                         l2_ascent = calculate_ascent(leg2['features'][0]['geometry']['coordinates'])
@@ -231,7 +267,7 @@ if run_btn:
                         st.session_state.map_layers.append({'geo': leg2, 'style': {'color': 'blue', 'weight': 4}, 'popup': "Leg 2"})
                         st.session_state.map_layers.append({'marker': [charger['lat'], charger['lon']], 'title': charger['title'], 'icon': 'bolt', 'color': 'orange'})
                     else:
-                         st.error("⚠️ No Chargers found!")
+                         st.error("No Chargers found!")
                 
                 status.update(label="Optimization Complete!", state="complete", expanded=False)
 
@@ -255,11 +291,14 @@ if st.session_state.best_route_stats:
     
     st.subheader("📊 Optimization Results")
     
+    # Display Temperature Context
+    st.markdown(f"**Conditions:** {stats['temp']}°C Ambient Temperature")
+
     diff = stats['rated_kwh'] - stats['kwh']
     if diff > 0:
         st.success(f"💡 Physics Insight: AI predicts this route is more efficient than rated! (Saved {diff:.2f} kWh)")
     else:
-        st.info(f"💡 Physics Insight: AI predicts {abs(diff):.2f} kWh extra usage due to hills/traffic.")
+        st.info(f"💡 Physics Insight: AI predicts {abs(diff):.2f} kWh extra usage due to hills/traffic/temp.")
 
     if current_kwh > needed_kwh:
         # SCENARIO A: Direct (Consolidated View)

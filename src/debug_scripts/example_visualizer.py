@@ -3,7 +3,6 @@ from data_loader import load_and_process_data
 
 def visualize_vehicle_examples():
     # 1. Get the data using our loader script
-    # We load 50,000 rows to ensure we get enough variety
     df = load_and_process_data(nrows=50000)
     
     if df is None or df.empty:

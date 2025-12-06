@@ -17,7 +17,7 @@ def extract_eved_data():
     return extract_path
 
 def debug_load():
-    print("🐞 STARTING DEBUG LOADER")
+    print("STARTING DEBUG LOADER")
     
     # 1. SETUP
     extract_path = extract_eved_data()
@@ -47,11 +47,11 @@ def debug_load():
                 chunks.append(ev_chunk)
     
     if not chunks:
-        print("❌ No EV rows found.")
+        print("No EV rows found.")
         return
 
     df = pd.concat(chunks)
-    print(f"   -> 📊 Raw Merged Rows: {len(df)}")
+    print(f"   -> Raw Merged Rows: {len(df)}")
 
     # 3. CHECKPOINT A: COLUMN MAPPING
     column_map = {
@@ -70,18 +70,18 @@ def debug_load():
     df = df.rename(columns={k:v for k,v in column_map.items() if k in df.columns})
     
     # 3. CHECKPOINT B: POWER CALCULATION
-    print("\n🔍 Checking Power Calculation...")
+    print("\nChecking Power Calculation...")
     if 'Voltage_V' in df.columns and 'Current_A' in df.columns:
         df['Instant_Power_kW'] = (df['Voltage_V'] * df['Current_A']) / 1000
         missing_power = df['Instant_Power_kW'].isna().sum()
         print(f"   -> Rows with NaN Power: {missing_power}")
         print(f"   -> Sample Power: {df['Instant_Power_kW'].head(3).tolist()}")
     else:
-        print("   ❌ MISSING VOLTAGE OR CURRENT COLUMNS!")
+        print("   MISSING VOLTAGE OR CURRENT COLUMNS!")
         print(f"   -> Columns available: {df.columns.tolist()}")
 
     # 4. CHECKPOINT C: ACCELERATION & TIMESTAMP
-    print("\n🔍 Checking Acceleration...")
+    print("\nChecking Acceleration...")
     if 'Timestamp_ms' in df.columns:
         df = df.sort_values(by=['Vehicle_ID', 'Trip_ID', 'Timestamp_ms'])
         grouped = df.groupby(['Vehicle_ID', 'Trip_ID'])
@@ -96,10 +96,10 @@ def debug_load():
         print(f"   -> Rows with 0s Time Delta (Duplicate Timestamp): {zeros}")
         print(f"   -> Rows with NaN Time Delta (Start of Trip): {nans}")
     else:
-        print("   ❌ Missing Timestamp column")
+        print("   Missing Timestamp column")
 
-    # 5. CHECKPOINT D: THE FILTERS (The Suspects)
-    print("\n🔍 Testing Filters (Where did the data go?)...")
+    # 5. CHECKPOINT D: 
+    print("\nTesting Filters (Where did the data go?)...")
     
     # Filter 1: DropNa
     n_before = len(df)
@@ -110,7 +110,7 @@ def debug_load():
     n_moving = df_no_na[df_no_na['Speed_kmh'] > 1]
     print(f"   -> After Speed > 1 filter: {len(n_moving)} rows (Lost {len(df_no_na) - len(n_moving)})")
     if len(n_moving) == 0:
-        print(f"      ⚠️ AVG SPEED CHECK: {df['Speed_kmh'].mean()}")
+        print(f"AVG SPEED CHECK: {df['Speed_kmh'].mean()}")
 
     # Filter 3: Power Range
     n_valid_power = n_moving[
@@ -119,7 +119,7 @@ def debug_load():
     ]
     print(f"   -> After Power Range filter: {len(n_valid_power)} rows")
 
-    print("\n🏁 DEBUG COMPLETE")
+    print("\nDEBUG COMPLETE")
 
 if __name__ == "__main__":
     debug_load()
